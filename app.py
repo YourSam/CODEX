@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-VERSION = '0.5.0'
+VERSION = '0.5.1'
 MAX_BYTES = 1_500_000
 TIMEOUT = 7
 SLOTS = threading.BoundedSemaphore(3)
@@ -568,10 +568,31 @@ def load_initial(url: str, checks: list) -> Resource:
         try:
             resource = browser_render(Resource(url, '', []))
         except CheckError as browser_error:
-            checks.append(finding('browser', 'Браузерная загрузка', 'unknown', str(browser_error), [url]))
+            failed = finding('browser', 'Браузерная загрузка', 'unknown', str(browser_error), [url])
+            failed.update(error_kind=browser_error.kind, http_status=browser_error.status)
+            checks.append(failed)
             raise initial_error
         checks.append(finding('browser', 'Браузерная загрузка', 'observed', 'Обычный загрузчик получил HTTP 401. Публичная страница получена в новой анонимной сессии Chromium. Авторизация пользователя не использовалась.', [resource.url]))
         return resource
+
+
+def browser_diagnostic(checks: list, connection: dict) -> dict:
+    if any(c['id'] == 'instagram' for c in checks):
+        return dict(state='unsupported', attempted=False, message='Instagram-профили пока не поддерживаются. Chromium не проверял этот аккаунт.')
+    check = next((c for c in checks if c['id'] == 'browser'), None)
+    if check:
+        return dict(state='loaded' if check['status'] == 'observed' else 'failed' if check['status'] == 'unknown' else 'disabled',
+                    attempted=check['status'] != 'not_connected', message=check['summary'],
+                    http_status=check.get('http_status'), error_kind=check.get('error_kind'))
+    if connection.get('error_kind') == 'http_auth':
+        return dict(state='skipped_auth', attempted=False, message='Chromium не запрашивал страницу: сервер вернул WWW-Authenticate — явный запрос авторизации. Автоматический вход не выполняется.')
+    if os.environ.get('STORELENS_BROWSER') != '1':
+        return dict(state='disabled', attempted=False, message='Браузерный режим выключен.')
+    if connection.get('http_status') in (403, 429):
+        return dict(state='skipped_access', attempted=False, message='Браузерная попытка не выполнялась после явного запрета доступа или ограничения частоты запросов.')
+    if connection.get('status') == 'unknown':
+        return dict(state='not_attempted', attempted=False, message='Chromium не запрашивал страницу: первоначальная загрузка завершилась сетевой ошибкой. Причина показана выше.')
+    return dict(state='not_needed', attempted=False, message='Страница получена обычным загрузчиком; браузерная попытка не понадобилась.')
 
 
 def check_store(value: str) -> dict:
@@ -604,7 +625,9 @@ def check_store(value: str) -> dict:
                         challenge = re.search(r'just a moment|verify you are human|checking your browser|captcha|проверка браузера|доступ ограничен', page.text, re.I)
                         checks.append(finding('browser', 'Динамическая страница', 'observed', 'Получен текст после выполнения JavaScript в изолированном браузере. Это не подтверждает добросовестность продавца.', [resource.url]))
                     except CheckError as exc:
-                        checks.append(finding('browser', 'Динамическая страница', 'unknown' if os.environ.get('STORELENS_BROWSER') == '1' else 'not_connected', str(exc), [resource.url]))
+                        failed = finding('browser', 'Браузерная загрузка', 'unknown' if os.environ.get('STORELENS_BROWSER') == '1' else 'not_connected', str(exc), [resource.url])
+                        failed.update(error_kind=exc.kind, http_status=exc.status)
+                        checks.append(failed)
                 pages.append(page)
                 title = page.title.strip()[:160] or host
                 checks.append(finding('connection', 'Загрузка и соединение', 'observed' if resource.url.startswith('https:') else 'caution', 'Страница загружена по HTTPS с проверкой сертификата. Это защищает соединение, но не подтверждает честность продавца.' if resource.url.startswith('https:') else 'Страница загружена по HTTP без шифрования.', [resource.url]))
@@ -644,7 +667,8 @@ def check_store(value: str) -> dict:
     collection = dict(site_loaded=bool(pages), http_status=connection.get('http_status'),
                       error_kind=connection.get('error_kind'),
                       message=connection.get('summary', '') if connection.get('status') == 'unknown' else '',
-                      external_results=sum(c['status'] in ('observed', 'caution') for c in checks if c['id'] in ('domain', 'archive', 'mentions')))
+                      external_results=sum(c['status'] in ('observed', 'caution') for c in checks if c['id'] in ('domain', 'archive', 'mentions')),
+                      browser=browser_diagnostic(checks, connection))
     return dict(url=url, host=host, title=title, checked_at=dt.datetime.now(dt.timezone.utc).isoformat(), duration_seconds=round(time.monotonic() - started, 1),
                 verdict='caution' if caution else 'insufficient',
                 headline=assessment['headline'], summary=assessment['explanation'], assessment=assessment,

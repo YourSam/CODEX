@@ -25,14 +25,17 @@ function sourceLink(url, label) {
 
 function render(data) {
   $('report-domain').textContent = data.host;
-  if (data.version !== '0.5.0') throw new Error('Запущена старая версия сервера. Остановите её и запустите приложение из новой папки проекта.');
+  if (data.version !== '0.5.1') throw new Error('Запущена старая версия сервера. Остановите её и запустите приложение из новой папки проекта.');
   $('report-verdict').textContent = data.headline;
   $('report-summary').textContent = data.summary;
   const assessment = data.assessment;
   const score = data.score;
   const collection = data.collection;
   $('collection-note').hidden = !collection.message;
-  $('collection-note').textContent = collection.message ? `${collection.message} Независимых результатов получено: ${collection.external_results}. Подробности — в источниках ниже.` : '';
+  $('collection-note').textContent = collection.message ? `Обычный загрузчик: ${collection.message} Независимых результатов получено: ${collection.external_results}.` : '';
+  $('browser-attempt-note').hidden = ['disabled', 'not_needed'].includes(collection.browser.state);
+  $('browser-attempt-note').textContent = collection.browser.message;
+  $('browser-attempt-note').classList.toggle('browser-loaded', collection.browser.state === 'loaded');
   $('score-value').textContent = score.value === null ? '—' : score.value;
   $('score-grade').textContent = score.grade;
   $('score-coverage').textContent = score.coverage;

@@ -1,12 +1,34 @@
 """Anonymous native browser loading through a public-address-only proxy."""
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
 
 from app import CheckError, MAX_BYTES, normalize_url
 from browser_proxy import BrowserProxy
+
+
+def explain_browser_error(exc):
+    """Expose only a whitelisted browser code, never raw URLs or credentials."""
+    match = re.search(r'net::(ERR_[A-Z_]+)', str(exc))
+    if match:
+        code = match[1]
+        hints = {
+            'ERR_TUNNEL_CONNECTION_FAILED': 'Не удалось установить защищённый туннель к сайту.',
+            'ERR_PROXY_CONNECTION_FAILED': 'Браузер не подключился к проверяющему прокси.',
+            'ERR_NAME_NOT_RESOLVED': 'Не удалось разрешить доменное имя.',
+            'ERR_CONNECTION_TIMED_OUT': 'Истекло время подключения к сайту.',
+            'ERR_CONNECTION_RESET': 'Соединение с сайтом было сброшено.',
+            'ERR_CERT_AUTHORITY_INVALID': 'Chromium не доверяет сертификату соединения. Проверка TLS сохранена.',
+            'ERR_CERT_DATE_INVALID': 'Chromium отклонил сертификат с некорректным сроком действия.',
+            'ERR_SSL_PROTOCOL_ERROR': 'Не удалось согласовать защищённое TLS-соединение.',
+        }
+        return CheckError(f'Chromium: {code}. ' + hints.get(code, 'Страница не загружена; точная причина пока не установлена.'), kind='browser_tls' if 'CERT_' in code or 'SSL_' in code else 'browser_network')
+    if type(exc).__name__ == 'TimeoutError':
+        return CheckError('Chromium: истекло время ожидания загрузки страницы.', kind='timeout')
+    return CheckError('Не удалось запустить или загрузить Chromium. Проверьте браузерный модуль и сетевое соединение.', kind='browser')
 
 
 def browser_options():
@@ -77,7 +99,10 @@ def render(url: str, *, launch_options=None, connector=None) -> dict:
             context.add_init_script("""for (const key of ['WebSocket','WebTransport','RTCPeerConnection','webkitRTCPeerConnection','Worker','SharedWorker']) { Object.defineProperty(globalThis,key,{value:undefined,configurable:false}); }""")
             page = context.new_page()
             page.route_web_socket('**/*', lambda ws: ws.close())
-            response = page.goto(initial_url, wait_until='domcontentloaded', timeout=18000)
+            try:
+                response = page.goto(initial_url, wait_until='domcontentloaded', timeout=18000)
+            except Exception as exc:
+                raise explain_browser_error(exc) from None
             if not response or response.status >= 400:
                 status = response.status if response else None
                 raise CheckError(f'Браузер тоже получил отказ HTTP {status}.' if status else 'Браузер не получил страницу.', kind='http', status=status)
@@ -103,8 +128,9 @@ def main():
         print(json.dumps({'ok': False, 'error': 'Playwright не установлен в активном Python. Запустите bash ./start-mac.command из папки проекта.', 'kind': 'not_configured'}))
     except CheckError as exc:
         print(json.dumps({'ok': False, 'error': str(exc), 'kind': exc.kind, 'status': exc.status}))
-    except Exception:
-        print(json.dumps({'ok': False, 'error': 'Не удалось запустить или загрузить Chromium. Проверьте установку браузера, поддержку sandbox и сетевой доступ командой bash ./start-mac.command.', 'kind': 'browser'}))
+    except Exception as exc:
+        error = explain_browser_error(exc)
+        print(json.dumps({'ok': False, 'error': str(error), 'kind': error.kind}))
 
 
 if __name__ == '__main__':

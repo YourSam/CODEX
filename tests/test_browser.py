@@ -14,9 +14,36 @@ import urllib.request
 
 import app
 import browser_proxy
+import browser_worker
 
 
 class NativeBrowserPipelineTests(unittest.TestCase):
+    def test_browser_exception_shows_code_without_private_url(self):
+        error = browser_worker.explain_browser_error(Exception('Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://shop.example/?token=secret-value'))
+        self.assertIn('ERR_TUNNEL_CONNECTION_FAILED', str(error))
+        self.assertNotIn('secret-value', str(error))
+        self.assertNotIn('https://', str(error))
+
+    def test_browser_certificate_error_is_distinct_from_installation(self):
+        error = browser_worker.explain_browser_error(Exception('net::ERR_CERT_AUTHORITY_INVALID'))
+        self.assertEqual(error.kind, 'browser_tls')
+        self.assertNotIn('установ', str(error).lower())
+
+    def test_diagnostic_distinguishes_original_401_and_browser_403(self):
+        connection = {'status': 'unknown', 'http_status': 401, 'error_kind': 'http'}
+        check = app.finding('browser', 'Браузер', 'unknown', 'Браузер получил HTTP 403')
+        check.update(http_status=403, error_kind='http')
+        diagnostic = app.browser_diagnostic([check], connection)
+        self.assertEqual(diagnostic['state'], 'failed')
+        self.assertEqual(diagnostic['http_status'], 403)
+        self.assertEqual(connection['http_status'], 401)
+
+    def test_auth_skip_does_not_claim_browser_requested_site(self):
+        diagnostic = app.browser_diagnostic([], {'http_status': 401, 'error_kind': 'http_auth'})
+        self.assertFalse(diagnostic['attempted'])
+        self.assertEqual(diagnostic['state'], 'skipped_auth')
+        self.assertIn('WWW-Authenticate', diagnostic['message'])
+
     def test_anonymous_browser_can_recover_non_auth_401(self):
         resource = app.Resource('https://shop.example/', '<p>shop@example.com Оплата картой.</p>', [])
         checks = []
