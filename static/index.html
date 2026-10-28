@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Проверьте доступные сведения об интернет-магазине перед покупкой. Находки, источники и ограничения в одном отчёте.">
+  <title>StoreLens — прежде чем платить</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="header wrap">
+    <a class="brand" href="/" aria-label="StoreLens — главная"><span class="brand-icon">◈</span> StoreLens<span class="beta">BETA</span></a>
+    <a class="header-link" href="#how">Как работает <span aria-hidden="true">→</span></a>
+  </header>
+  <main class="wrap">
+    <section class="hero">
+      <div class="eyebrow"><span class="dot"></span> Чуть больше уверенности перед покупкой</div>
+      <h1>Сначала проверьте.<br><span>Потом покупайте.</span></h1>
+      <p class="intro">Красивый сайт — ещё не надёжный магазин. Соберём доступные сведения и покажем, на что обратить внимание.</p>
+      <form id="check-form" class="search-card">
+        <label for="store-url">Ссылка на магазин</label>
+        <div class="input-row"><span class="link-icon" aria-hidden="true">→</span><input id="store-url" name="url" type="text" inputmode="url" autocomplete="url" placeholder="Например, galaxyshub.ru" maxlength="2048" required aria-describedby="input-hint"><button id="submit" type="submit">Проверить <span aria-hidden="true">→</span></button></div>
+        <p id="input-hint" class="input-hint">Без регистрации. Ссылки с паролями и внутренние адреса не принимаются.</p>
+      </form>
+      <p id="error" class="error" role="alert" hidden></p>
+      <div class="examples"><span>Попробовать:</span><button type="button" data-site="galaxyshub.ru">galaxyshub.ru →</button><button type="button" data-site="galaxypoint.ru">galaxypoint.ru →</button><button type="button" data-site="kadrum.store">kadrum.store →</button><button type="button" data-site="fmart.com.ru">fmart.com.ru →</button><button type="button" data-site="tecnotop.ru">tecnotop.ru →</button></div>
+    </section>
+
+    <section id="loading" class="loading-panel" aria-live="polite" hidden>
+      <div class="spinner" aria-hidden="true"></div><div><h2>Собираем доступные сведения</h2><p id="loading-message">Проверяем страницу магазина и историю домена…</p><p class="small">Обычно до минуты. Недоступные источники будут отмечены в отчёте.</p></div>
+    </section>
+
+    <section id="report" class="report" aria-labelledby="report-heading" hidden>
+      <div class="section-heading"><div class="eyebrow">Результат проверки</div><button type="button" class="text-button" id="print">Сохранить PDF →</button></div>
+      <div id="verdict" class="verdict"><div class="verdict-symbol" aria-hidden="true">!</div><div><p class="report-domain" id="report-domain"></p><h2 id="report-heading" tabindex="-1"></h2><p id="report-summary"></p><p class="report-meta" id="report-meta"></p></div></div>
+      <div class="report-layout"><div><div class="section-heading"><h3>Что удалось узнать</h3><span class="small" id="check-count"></span></div><div id="checks" class="checks"></div></div><aside><div class="side-card"><span class="card-number">01 / СЛЕДУЮЩИЙ ШАГ</span><h3>Перед оплатой</h3><ol id="next-steps"></ol></div><div class="side-card muted-card"><span class="card-number">02 / ГРАНИЦЫ ПРОВЕРКИ</span><p id="limitations"></p><p class="small">Сервис не выдаёт гарантию безопасности и не подтверждает факт мошенничества без доказательств.</p></div></aside></div>
+      <details class="sources"><summary>Просмотренные страницы <span id="page-count"></span></summary><ul id="pages"></ul></details>
+    </section>
+
+    <section id="how" class="how"><div class="section-heading"><h2>Факты вместо догадок</h2><span class="small">Прозрачно на каждом шаге</span></div><div class="feature-grid">
+      <article><span class="feature-icon">→</span><h3>Одна ссылка</h3><p>Укажите адрес магазина. Найдём доступные страницы с контактами, оплатой и возвратом.</p></article>
+      <article><span class="feature-icon">⌕</span><h3>Находки с источниками</h3><p>Покажем сведения о домене и фрагменты страниц. Заявления продавца отделим от подтверждённых данных.</p></article>
+      <article><span class="feature-icon">≡</span><h3>Понятный результат</h3><p>Объясним, что обнаружено и чего не хватает. Недостаток информации — тоже важный результат.</p></article>
+    </div></section>
+    <section class="scope"><span class="scope-icon" aria-hidden="true">ⓘ</span><p><strong>Что умеет эта версия.</strong> Загрузка страниц и проверка истории домена через RDAP. ИИ, независимые отзывы и базы угроз ещё не подключены. Для Instagram пока используйте сайт из описания профиля.</p></section>
+  </main>
+  <footer class="wrap footer"><span class="brand footer-brand">◈ StoreLens</span><span>Помогаем задавать правильные вопросы.</span><span>Прототип · 2026</span></footer>
+</body>
+</html>
