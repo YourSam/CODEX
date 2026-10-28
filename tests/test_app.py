@@ -150,6 +150,51 @@ class AnalysisTests(unittest.TestCase):
         self.assertIn('не доказательство', check['summary'])
 
 
+class EvidenceScoreTests(unittest.TestCase):
+    def test_contact_only_site_has_a_number_without_implying_safety(self):
+        checks = [app.finding('contacts', 'Контакты', 'observed', 'Контакты указаны')]
+        score = app.score_evidence(checks, 1)
+        self.assertIsInstance(score['value'], int)
+        self.assertGreater(score['value'], 0)
+        self.assertLess(score['value'], 50)
+        self.assertIn('не вероятность', score['description'])
+        self.assertEqual(score['value'], sum(row['points'] for row in score['breakdown']))
+
+    def test_unavailable_site_or_unsupported_profile_has_no_rating(self):
+        checks = [app.finding('domain', 'Домен', 'observed', 'Старый домен')]
+        self.assertIsNone(app.score_evidence(checks, 0)['value'])
+        checks += [app.finding('contacts', 'Контакты', 'observed', 'Контакты')]
+        self.assertIsNone(app.score_evidence(checks + [app.finding('instagram', 'Instagram', 'unknown', '')], 1)['value'])
+
+    def test_https_alone_does_not_generate_a_merchant_rating(self):
+        checks = [app.finding('connection', 'Соединение', 'observed', 'HTTPS')]
+        self.assertIsNone(app.score_evidence(checks, 1)['value'])
+
+    def test_missing_checks_never_rescale_remaining_facts_to_100(self):
+        checks = [app.finding('contacts', 'Контакты', 'observed', '')]
+        initial = app.score_evidence(checks, 1)
+        checks += [app.finding('reputation', 'Репутация', 'not_connected', '')]
+        self.assertEqual(app.score_evidence(checks, 1)['value'], initial['value'])
+        self.assertEqual(initial['maximum'], 100)
+
+    def test_all_self_reported_facts_cannot_generate_high_confidence(self):
+        keys = ['connection', 'contacts', 'company', 'returns', 'payment', 'domain']
+        checks = [app.finding(key, key, 'observed', '') for key in keys]
+        score = app.score_evidence(checks, 1)
+        self.assertLessEqual(score['value'], 40)
+        self.assertEqual(sum(row['maximum'] for row in score['breakdown']), 100)
+        self.assertIn('6 из 9', score['coverage'])
+        # A placeholder is not an implemented independent verification.
+        checks += [app.finding(key, key, 'observed', '') for key in ['registry', 'reputation', 'threats']]
+        self.assertEqual(app.score_evidence(checks, 1)['value'], score['value'])
+
+    def test_young_domain_and_failed_source_do_not_earn_positive_points(self):
+        checks = [app.finding('contacts', 'Контакты', 'observed', ''), app.finding('domain', 'Домен', 'caution', '')]
+        score = app.score_evidence(checks, 1)
+        self.assertEqual(next(row for row in score['breakdown'] if row['check_id'] == 'domain')['points'], 0)
+        self.assertIn('2 из 9', score['coverage'])
+
+
 class HTTPTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -174,7 +219,9 @@ class HTTPTests(unittest.TestCase):
             self.assertIn(b'StoreLens', response.read())
             self.assertIn("frame-ancestors 'none'", response.headers['Content-Security-Policy'])
         with self.request('/api/health') as response:
-            self.assertEqual(json.load(response)['status'], 'ok')
+            health = json.load(response)
+            self.assertEqual(health['status'], 'ok')
+            self.assertEqual(health['version'], app.VERSION)
 
     def test_api_rejects_private_url(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
@@ -196,6 +243,8 @@ class HTTPTests(unittest.TestCase):
             with self.request('/api/check', b'{"url":"shop.example"}', {'Content-Type': 'application/json'}) as response:
                 data = json.load(response)
         self.assertEqual(data['verdict'], 'insufficient')
+        self.assertIsNone(data['score']['value'])
+        self.assertEqual(data['version'], app.VERSION)
         self.assertGreater(len(data['checks']), 0)
 
 

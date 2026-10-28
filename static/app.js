@@ -25,9 +25,37 @@ function sourceLink(url, label) {
 
 function render(data) {
   $('report-domain').textContent = data.host;
-  $('report-heading').textContent = data.headline;
+  if (data.version !== '0.3.0') throw new Error('Запущена старая версия сервера. Остановите её и запустите приложение из новой папки проекта.');
+  $('report-verdict').textContent = data.headline;
   $('report-summary').textContent = data.summary;
   const assessment = data.assessment;
+  const score = data.score;
+  $('score-value').textContent = score.value === null ? '—' : score.value;
+  $('score-grade').textContent = score.grade;
+  $('score-coverage').textContent = score.coverage;
+  $('score-description').textContent = score.description;
+  $('score-methodology').textContent = score.explanation;
+  $('score-breakdown').replaceChildren(...score.breakdown.map(item => {
+    const row = element('li');
+    const text = `${item.label}: ${item.points} из ${item.maximum}`;
+    if (!data.checks.some(check => check.id === item.check_id)) {
+      row.textContent = text + ' — сведения не получены';
+      return row;
+    }
+    const link = element('a', '', text);
+    link.href = `#check-${item.check_id}`;
+    row.append(link);
+    return row;
+  }));
+  const reasons = [...assessment.signals.slice(0, 1), ...assessment.facts.filter(f => f.check_id !== 'connection').slice(0, 1), ...assessment.gaps.filter(g => ['registry', 'reputation'].includes(g.check_id)).slice(0, 2)].slice(0, 3);
+  $('score-reasons').replaceChildren(...reasons.map(item => {
+    const row = element('li');
+    const link = element('a', '', item.text);
+    link.href = `#check-${item.check_id}`;
+    row.append(link);
+    return row;
+  }));
+  $('report-details').open = false;
   $('recommendation').textContent = assessment.recommendation;
   $('coverage').textContent = assessment.coverage;
   for (const [id, items, emptyText] of [
@@ -99,6 +127,9 @@ form.addEventListener('submit', async (event) => {
     const response = await fetch('/api/check', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url}), signal: controller.signal});
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Не удалось выполнить проверку.');
+    // Remove the loading panel before scrolling, so its collapse cannot move
+    // the score above the viewport after the scroll destination is calculated.
+    $('loading').hidden = true;
     render(data);
   } catch (error) {
     $('error').textContent = error.name === 'AbortError' ? 'Истекло время ожидания. Попробуйте ещё раз или проверьте другой магазин.' : error.message === 'Failed to fetch' ? 'Нет соединения с сервером. Убедитесь, что приложение запущено.' : error.message;
@@ -120,3 +151,15 @@ document.querySelectorAll('[data-site]').forEach(button => button.addEventListen
   form.requestSubmit();
 }));
 $('print').addEventListener('click', () => window.print());
+
+// Open the source details before following an evidence link into that section.
+$('report').addEventListener('click', (event) => {
+  const link = event.target.closest('a[href^="#check-"]');
+  if (link) $('report-details').open = true;
+});
+let detailsWereOpen = false;
+window.addEventListener('beforeprint', () => {
+  detailsWereOpen = $('report-details').open;
+  $('report-details').open = true;
+});
+window.addEventListener('afterprint', () => { $('report-details').open = detailsWereOpen; });

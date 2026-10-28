@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).parent
+VERSION = '0.3.0'
 MAX_BYTES = 1_500_000
 TIMEOUT = 7
 SLOTS = threading.BoundedSemaphore(3)
@@ -321,6 +322,44 @@ def make_assessment(checks: list[dict], page_count: int) -> dict:
                 coverage='Ограниченная проверка — внешняя репутация, организация и базы угроз не проверены.')
 
 
+def score_evidence(checks: list[dict], page_count: int) -> dict:
+    """A fixed-denominator evidence index, not a calibrated fraud probability.
+
+    Missing sources earn no points, but are not negative findings. Unimplemented
+    independent checks reserve 60 points; their placeholder statuses cannot earn
+    points until those integrations and their evidence criteria are implemented.
+    """
+    factors = [
+        ('connection', 'Защищённое соединение', 5),
+        ('contacts', 'Контакты на сайте', 5),
+        ('company', 'Заявленные реквизиты', 5),
+        ('returns', 'Текст о возврате', 10),
+        ('payment', 'Текст об оплате', 10),
+        ('domain', 'Домен старше 180 дней', 5),
+        ('registry', 'Подтверждение продавца по реестру', 25),
+        ('reputation', 'Независимая репутация', 25),
+        ('threats', 'Проверка известных угроз', 10),
+    ]
+    by_id = {c['id']: c for c in checks}
+    merchant_data = any(by_id.get(key, {}).get('status') == 'observed' for key in ('contacts', 'company', 'returns', 'payment'))
+    available = bool(page_count and merchant_data and 'instagram' not in by_id)
+    breakdown = []
+    for key, label, maximum in factors:
+        status = by_id.get(key, {}).get('status', 'unknown')
+        # Independent integrations do not exist yet; never award their reserved points.
+        implemented = key not in ('registry', 'reputation', 'threats')
+        points = maximum if available and implemented and status == 'observed' else 0
+        breakdown.append(dict(check_id=key, label=label, points=points, maximum=maximum,
+                              status=status if implemented else 'not_connected'))
+    value = sum(row['points'] for row in breakdown) if available else None
+    obtained = sum(by_id.get(key, {}).get('status') in ('observed', 'caution') for key, _, _ in factors if key not in ('registry', 'reputation', 'threats'))
+    return dict(value=value, maximum=100, grade='Мало подтверждений' if available else 'Оценка недоступна',
+                description='Предварительный индекс подтверждений, не вероятность безопасности. Низкий балл может означать нехватку данных, а не мошенничество.',
+                coverage=f'Получены сведения по {obtained} из {len(factors)} направлений.',
+                breakdown=breakdown, methodology_version='evidence-0.1',
+                explanation='Баллы начисляются за найденные сведения по фиксированной шкале. Недоступные и неподключённые проверки не добавляют баллов. Внешние источники пока не подключены, поэтому максимум текущей версии — 40/100.')
+
+
 def domain_check(host: str) -> dict:
     url = 'https://rdap.org/domain/' + host.removeprefix('www.')
     try:
@@ -392,6 +431,7 @@ def check_store(value: str) -> dict:
     return dict(url=url, host=host, title=title, checked_at=dt.datetime.now(dt.timezone.utc).isoformat(), duration_seconds=round(time.monotonic() - started, 1),
                 verdict='caution' if caution else 'insufficient',
                 headline=assessment['headline'], summary=assessment['explanation'], assessment=assessment,
+                score=score_evidence(checks, len(pages)), version=VERSION,
                 checks=checks, observed=observed, caution=caution,
                 pages=[{'url': p.url, 'title': p.title[:160]} for p in pages],
                 next_steps=['Сверьте ИНН, название и платёжные реквизиты с официальным реестром.', 'Поищите независимые отзывы по домену, телефону и реквизитам.', 'Предпочитайте оплату с защитой покупателя; избегайте переводов незнакомому физлицу.'],
@@ -399,7 +439,7 @@ def check_store(value: str) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'StoreLens/0.1'
+    server_version = 'StoreLens/' + VERSION
 
     def log_message(self, fmt, *args):
         # Do not log submitted URLs, query strings or report content.
@@ -422,7 +462,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         if path == '/api/health':
-            return self.json(200, {'status': 'ok', 'version': '0.1', 'analysis_mode': 'rules'})
+            return self.json(200, {'status': 'ok', 'version': VERSION, 'analysis_mode': 'rules'})
         files = {'/': ('index.html', 'text/html'), '/style.css': ('style.css', 'text/css'), '/app.js': ('app.js', 'text/javascript')}
         if path not in files:
             return self.json(404, {'error': 'Страница не найдена.'})
@@ -470,11 +510,13 @@ class Server(ThreadingHTTPServer):
 
 def main():
     parser = argparse.ArgumentParser(description='StoreLens — проверка магазина')
+    parser.add_argument('--version', action='version', version='StoreLens ' + VERSION)
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8000)
     args = parser.parse_args()
     server = Server((args.host, args.port), Handler)
-    print(f'StoreLens: http://{args.host}:{args.port} (Ctrl+C для остановки)', flush=True)
+    print(f'StoreLens {VERSION}: http://{args.host}:{args.port} (Ctrl+C для остановки)', flush=True)
+    print(f'Папка проекта: {ROOT.resolve()}', flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

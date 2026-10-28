@@ -10,7 +10,7 @@
 </head>
 <body>
   <header class="header wrap">
-    <a class="brand" href="/" aria-label="StoreLens — главная"><span class="brand-icon">◈</span> StoreLens<span class="beta">BETA</span></a>
+    <a class="brand" href="/" aria-label="StoreLens — главная"><span class="brand-icon">◈</span> StoreLens<span class="beta">v0.3.0</span></a>
     <a class="header-link" href="#how">Как работает <span aria-hidden="true">→</span></a>
   </header>
   <main class="wrap">
@@ -33,12 +33,21 @@
 
     <section id="report" class="report" aria-labelledby="report-heading" hidden>
       <div class="section-heading"><div class="eyebrow">Результат проверки</div><button type="button" class="text-button" id="print">Сохранить PDF →</button></div>
-      <div id="verdict" class="verdict"><div class="verdict-symbol" aria-hidden="true">!</div><div><p class="report-domain" id="report-domain"></p><h2 id="report-heading" tabindex="-1"></h2><p id="report-summary"></p><div class="decision"><h3>Что делать перед оплатой</h3><p id="recommendation"></p></div><p class="report-meta" id="report-meta"></p></div></div>
+      <div class="score-card">
+        <div class="score-main"><div><p class="report-domain" id="report-domain"></p><h2 id="report-heading" tabindex="-1">Уверенность в сайте</h2><div class="score-number" aria-live="polite"><span id="score-value">—</span><span class="score-max">/100</span></div><p class="score-grade" id="score-grade"></p></div><div class="score-context"><p id="score-coverage"></p><p id="score-description"></p></div></div>
+        <div class="score-conclusion"><h3 id="report-verdict"></h3><p id="recommendation"></p></div>
+        <p class="report-meta" id="report-meta"></p>
+      </div>
+      <section class="quick-reasons"><h3>Почему такая оценка</h3><ul id="score-reasons"></ul></section>
+      <details class="score-method"><summary>Как рассчитаны баллы</summary><p id="score-methodology"></p><ul id="score-breakdown"></ul></details>
+      <details id="report-details" class="report-details"><summary>Объяснения и источники <span id="check-count"></span></summary>
+      <p id="report-summary" class="detail-intro"></p>
       <div class="assessment-grid"><section class="assessment-card"><h3>На что опирается итог</h3><ul id="assessment-facts"></ul></section><section class="assessment-card"><h3>Чего не хватает для решения</h3><ul id="assessment-gaps"></ul></section></div>
       <section id="assessment-signals-card" class="assessment-card signals-card" hidden><h3>Поводы для осторожности</h3><ul id="assessment-signals"></ul></section>
       <p id="coverage" class="coverage"></p>
-      <div class="report-layout"><div><div class="section-heading"><h3>Что удалось узнать</h3><span class="small" id="check-count"></span></div><div id="checks" class="checks"></div></div><aside><div class="side-card"><span class="card-number">01 / СЛЕДУЮЩИЙ ШАГ</span><h3>Перед оплатой</h3><ol id="next-steps"></ol></div><div class="side-card muted-card"><span class="card-number">02 / ГРАНИЦЫ ПРОВЕРКИ</span><p id="limitations"></p><p class="small">Сервис не выдаёт гарантию безопасности и не подтверждает факт мошенничества без доказательств.</p></div></aside></div>
+      <div class="report-layout"><div><div class="section-heading"><h3>Что удалось узнать</h3></div><div id="checks" class="checks"></div></div><aside><div class="side-card"><span class="card-number">01 / СЛЕДУЮЩИЙ ШАГ</span><h3>Перед оплатой</h3><ol id="next-steps"></ol></div><div class="side-card muted-card"><span class="card-number">02 / ГРАНИЦЫ ПРОВЕРКИ</span><p id="limitations"></p><p class="small">Сервис не выдаёт гарантию безопасности и не подтверждает факт мошенничества без доказательств.</p></div></aside></div>
       <details class="sources"><summary>Просмотренные страницы <span id="page-count"></span></summary><ul id="pages"></ul></details>
+      </details>
     </section>
 
     <section id="how" class="how"><div class="section-heading"><h2>Факты вместо догадок</h2><span class="small">Прозрачно на каждом шаге</span></div><div class="feature-grid">
@@ -48,6 +57,6 @@
     </div></section>
     <section class="scope"><span class="scope-icon" aria-hidden="true">ⓘ</span><p><strong>Что умеет эта версия.</strong> Загрузка страниц и проверка истории домена через RDAP. ИИ, независимые отзывы и базы угроз ещё не подключены. Для Instagram пока используйте сайт из описания профиля.</p></section>
   </main>
-  <footer class="wrap footer"><span class="brand footer-brand">◈ StoreLens</span><span>Помогаем задавать правильные вопросы.</span><span>Прототип · 2026</span></footer>
+  <footer class="wrap footer"><span class="brand footer-brand">◈ StoreLens</span><span>Помогаем задавать правильные вопросы.</span><span>Версия 0.3.0 · 2026</span></footer>
 </body>
 </html>
