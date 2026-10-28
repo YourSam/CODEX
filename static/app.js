@@ -27,12 +27,32 @@ function render(data) {
   $('report-domain').textContent = data.host;
   $('report-heading').textContent = data.headline;
   $('report-summary').textContent = data.summary;
+  const assessment = data.assessment;
+  $('recommendation').textContent = assessment.recommendation;
+  $('coverage').textContent = assessment.coverage;
+  for (const [id, items, emptyText] of [
+    ['assessment-facts', assessment.facts, 'Сведения о магазине, достаточные для оценки продавца, не получены.'],
+    ['assessment-gaps', assessment.gaps, 'Пробелы в данных не отмечены. Это не гарантия безопасности.'],
+    ['assessment-signals', assessment.signals, ''],
+  ]) {
+    const rows = items.map(item => {
+      const row = element('li');
+      const link = element('a', '', item.text);
+      link.href = `#check-${item.check_id}`;
+      row.append(link);
+      return row;
+    });
+    if (!rows.length && emptyText) rows.push(element('li', 'empty-fact', emptyText));
+    $(id).replaceChildren(...rows);
+  }
+  $('assessment-signals-card').hidden = !assessment.signals.length;
   const date = new Date(data.checked_at).toLocaleString('ru-RU');
   $('report-meta').textContent = `${date} · ${data.duration_seconds} сек. · Автоматические проверки без ИИ`;
   $('check-count').textContent = `${data.checks.length} пунктов`;
   $('checks').replaceChildren();
   for (const check of data.checks) {
     const card = element('article', 'check');
+    card.id = `check-${check.id}`;
     const heading = element('div', 'check-heading');
     heading.append(element('h4', '', check.title), element('span', `badge ${check.status}`, labels[check.status] || check.status));
     card.append(heading, element('p', '', check.summary));

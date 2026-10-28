@@ -173,6 +173,8 @@ class Page(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.url = source.url
         self.parts = []
+        self.prose_parts = []
+        self.chrome = 0
         self.links = []
         self.title = ''
         self.hidden = 0
@@ -180,11 +182,14 @@ class Page(HTMLParser):
         self.anchor = None
         self.feed(source.text)
         self.text = re.sub(r'\s+', ' ', ' '.join(self.parts)).strip()
+        self.prose = re.sub(r'\s+', ' ', ' '.join(self.prose_parts)).strip()
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
         if tag in ('script', 'style', 'noscript', 'template'):
             self.hidden += 1
+        if tag in ('nav', 'header', 'footer'):
+            self.chrome += 1
         if tag == 'title':
             self.in_title = True
         if tag == 'a':
@@ -193,6 +198,8 @@ class Page(HTMLParser):
     def handle_endtag(self, tag):
         if tag in ('script', 'style', 'noscript', 'template'):
             self.hidden = max(0, self.hidden - 1)
+        if tag in ('nav', 'header', 'footer'):
+            self.chrome = max(0, self.chrome - 1)
         if tag == 'title':
             self.in_title = False
         if tag == 'a' and self.anchor:
@@ -202,6 +209,8 @@ class Page(HTMLParser):
     def handle_data(self, data):
         if not self.hidden:
             self.parts.append(data)
+            if not self.chrome and not self.anchor and not self.in_title:
+                self.prose_parts.append(data)
             if self.in_title:
                 self.title += data
             if self.anchor:
@@ -231,19 +240,85 @@ def analyze_pages(pages: list[Page]) -> list[dict]:
     definitions = [
         ('contacts', 'Контакты', r'[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}|(?:\+7|8)[\s(.-]*\d{3}[\s).-]*\d{3}[\s.-]*\d{2}[\s.-]*\d{2}', 'Контакты найдены. Их принадлежность продавцу не подтверждена.'),
         ('company', 'Реквизиты продавца', r'\b(?:ИНН|ОГРН(?:ИП)?)\s*[:№]?\s*\d{10,15}\b', 'Найдены заявленные реквизиты. Проверка по реестру пока не подключена.'),
-        ('returns', 'Условия возврата', r'.{0,65}(?:возврат\w*|refund\w*|return policy).{0,110}', 'Найдены упоминания возврата. Полнота и законность условий не подтверждены.'),
-        ('payment', 'Условия оплаты', r'.{0,65}(?:оплат\w*|payment|checkout).{0,110}', 'Найдены упоминания оплаты. Это не подтверждает безопасность платежа.'),
+        ('returns', 'Условия возврата', r'.{0,65}(?:возврат\w*|refund\w*|return policy).{0,110}', 'Найден текст о возврате. Полнота и законность условий не подтверждены.'),
+        ('payment', 'Условия оплаты', r'.{0,65}(?:оплат\w*|payment|checkout).{0,110}', 'Найден текст о способах или порядке оплаты. Безопасность платежа не подтверждена.'),
     ]
     checks = []
     for key, title, pattern, summary in definitions:
-        evidence, sources = [], []
+        evidence, sources, seen = [], [], set()
         for page in pages:
-            hits = list(dict.fromkeys(re.findall(pattern, page.text, re.I)))[:2]
+            text = page.prose if key in ('returns', 'payment') else page.text
+            hits = list(dict.fromkeys(re.findall(pattern, text, re.I)))
+            if key == 'returns':
+                hits = [h for h in hits if re.search(r'\d|срок|заявлен|товар|денег|средств|деньг|отказ|обмен|days?|policy|business', h, re.I)]
+            if key == 'payment':
+                hits = [h for h in hits if re.search(r'карт|налич|перевод|сч[её]т|получени|предоплат|рассроч|credit|debit|card|cash|bank|paypal', h, re.I)]
+            hits = hits[:2]
             if hits:
-                evidence.extend(hits)
                 sources.append(page.url)
+                for hit in hits:
+                    token = re.sub(r'\s+', ' ', hit).strip().lower()
+                    if key == 'contacts' and '@' not in token:
+                        token = re.sub(r'\D', '', token)
+                        if len(token) == 11 and token.startswith('8'):
+                            token = '7' + token[1:]
+                    if token not in seen:
+                        seen.add(token)
+                        evidence.append(hit)
         checks.append(finding(key, title, 'observed' if evidence else 'unknown', summary if evidence else 'На просмотренных страницах сведения не обнаружены. Они могут быть на других страницах или загружаться через JavaScript.', sources, evidence[:4]))
     return checks
+
+
+def make_assessment(checks: list[dict], page_count: int) -> dict:
+    """Summarise evidence and missing checks, never turn missing data into fraud."""
+    by_id = {c['id']: c for c in checks}
+    facts, gaps, signals = [], [], []
+    descriptions = {
+        'connection': 'Страница доступна по HTTPS; это подтверждает только защищённость соединения.',
+        'contacts': 'На сайте указаны контакты. Их принадлежность продавцу не подтверждена.',
+        'company': 'На сайте указаны реквизиты. Они ещё не сверены с реестром.',
+        'returns': 'Найден текст о возврате. Выполнение этих условий не проверено.',
+        'payment': 'Найден текст о способах или порядке оплаты.',
+        'domain': 'Получена дата регистрации домена. Это не подтверждает историю продавца.',
+    }
+    for key, check in by_id.items():
+        if check['status'] == 'caution':
+            signals.append({'check_id': key, 'text': check['summary']})
+        elif check['status'] == 'observed' and key in descriptions:
+            facts.append({'check_id': key, 'text': descriptions[key]})
+    missing = {
+        'company': 'Реквизиты продавца не найдены на просмотренных страницах.',
+        'returns': 'Текст условий возврата не найден на просмотренных страницах.',
+        'payment': 'Конкретные условия оплаты не найдены на просмотренных страницах.',
+        'contacts': 'Контакты не найдены на просмотренных страницах.',
+        'domain': 'Не удалось установить дату регистрации домена.',
+        'content': 'Содержимое магазина может быть неполным из-за защиты или динамической загрузки.',
+        'registry': 'Организация и её связь с магазином не проверены: реестр не подключён.',
+        'reputation': 'Независимые отзывы и жалобы не проверены: поиск не подключён.',
+        'threats': 'Проверка по базам известных угроз не выполнена: источник не подключён.',
+    }
+    for key, text in missing.items():
+        if key in by_id and by_id[key]['status'] in ('unknown', 'not_connected'):
+            gaps.append({'check_id': key, 'text': text})
+    if 'instagram' in by_id:
+        recommendation = 'Для проверки продавца вставьте сайт из описания профиля.'
+        explanation = 'Instagram-профиль не проанализирован: доступ к платформе пока не подключён. Сделать вывод о продавце по этой ссылке нельзя.'
+        headline = 'Этот профиль пока не удалось проверить'
+    elif not page_count:
+        recommendation = 'Повторите проверку позже. Для решения об оплате этот отчёт не подходит.'
+        explanation = 'Содержимое магазина получить не удалось. Даже если сведения о домене доступны, они не позволяют оценить выполнение заказов.'
+        headline = 'Проверка магазина не завершена'
+        gaps.insert(0, {'check_id': 'connection', 'text': 'Страницы магазина не получены. Причина указана в проверке загрузки.'})
+    else:
+        recommendation = 'С предоплатой стоит подождать: сначала подтвердите продавца и способ защиты платежа.'
+        headline = 'Надёжность продавца пока не подтверждена'
+        found = [label for key, label in [('contacts', 'контакты'), ('company', 'заявленные реквизиты'), ('returns', 'текст о возврате'), ('payment', 'текст об оплате')] if by_id.get(key, {}).get('status') == 'observed']
+        explanation = ('На сайте найдены: ' + ', '.join(found) + '. ' if found else 'Страницы загружены, но ключевые сведения о продавце не найдены. ')
+        explanation += 'Сведения на сайте сами по себе не подтверждают выполнение заказов. '
+        explanation += 'Есть отдельные поводы для осторожности — они перечислены ниже.' if signals else 'Этих данных недостаточно, чтобы рекомендовать предоплату или обвинять магазин в мошенничестве.'
+    return dict(headline=headline, explanation=explanation, recommendation=recommendation,
+                facts=facts, gaps=gaps, signals=signals,
+                coverage='Ограниченная проверка — внешняя репутация, организация и базы угроз не проверены.')
 
 
 def domain_check(host: str) -> dict:
@@ -313,10 +388,10 @@ def check_store(value: str) -> dict:
     ])
     caution = sum(c['status'] == 'caution' for c in checks)
     observed = sum(c['status'] == 'observed' for c in checks)
+    assessment = make_assessment(checks, len(pages))
     return dict(url=url, host=host, title=title, checked_at=dt.datetime.now(dt.timezone.utc).isoformat(), duration_seconds=round(time.monotonic() - started, 1),
                 verdict='caution' if caution else 'insufficient',
-                headline='Есть поводы для дополнительной проверки' if caution else 'Недостаточно данных для вывода о надёжности',
-                summary='Не переводите предоплату, опираясь только на этот отчёт. Технические сведения и заявления магазина не подтверждают выполнение заказов.',
+                headline=assessment['headline'], summary=assessment['explanation'], assessment=assessment,
                 checks=checks, observed=observed, caution=caution,
                 pages=[{'url': p.url, 'title': p.title[:160]} for p in pages],
                 next_steps=['Сверьте ИНН, название и платёжные реквизиты с официальным реестром.', 'Поищите независимые отзывы по домену, телефону и реквизитам.', 'Предпочитайте оплату с защитой покупателя; избегайте переводов незнакомому физлицу.'],

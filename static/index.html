@@ -33,7 +33,10 @@
 
     <section id="report" class="report" aria-labelledby="report-heading" hidden>
       <div class="section-heading"><div class="eyebrow">Результат проверки</div><button type="button" class="text-button" id="print">Сохранить PDF →</button></div>
-      <div id="verdict" class="verdict"><div class="verdict-symbol" aria-hidden="true">!</div><div><p class="report-domain" id="report-domain"></p><h2 id="report-heading" tabindex="-1"></h2><p id="report-summary"></p><p class="report-meta" id="report-meta"></p></div></div>
+      <div id="verdict" class="verdict"><div class="verdict-symbol" aria-hidden="true">!</div><div><p class="report-domain" id="report-domain"></p><h2 id="report-heading" tabindex="-1"></h2><p id="report-summary"></p><div class="decision"><h3>Что делать перед оплатой</h3><p id="recommendation"></p></div><p class="report-meta" id="report-meta"></p></div></div>
+      <div class="assessment-grid"><section class="assessment-card"><h3>На что опирается итог</h3><ul id="assessment-facts"></ul></section><section class="assessment-card"><h3>Чего не хватает для решения</h3><ul id="assessment-gaps"></ul></section></div>
+      <section id="assessment-signals-card" class="assessment-card signals-card" hidden><h3>Поводы для осторожности</h3><ul id="assessment-signals"></ul></section>
+      <p id="coverage" class="coverage"></p>
       <div class="report-layout"><div><div class="section-heading"><h3>Что удалось узнать</h3><span class="small" id="check-count"></span></div><div id="checks" class="checks"></div></div><aside><div class="side-card"><span class="card-number">01 / СЛЕДУЮЩИЙ ШАГ</span><h3>Перед оплатой</h3><ol id="next-steps"></ol></div><div class="side-card muted-card"><span class="card-number">02 / ГРАНИЦЫ ПРОВЕРКИ</span><p id="limitations"></p><p class="small">Сервис не выдаёт гарантию безопасности и не подтверждает факт мошенничества без доказательств.</p></div></aside></div>
       <details class="sources"><summary>Просмотренные страницы <span id="page-count"></span></summary><ul id="pages"></ul></details>
     </section>

@@ -65,6 +65,31 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(checks['company']['status'], 'unknown')
         self.assertEqual(checks['returns']['status'], 'observed')
 
+    def test_navigation_is_not_payment_or_returns_policy(self):
+        html = '<nav>Методы оплаты картой Возврат товара</nav><a href="/pay">Оплата картой</a><footer>Возврат товара 14 дней</footer>'
+        page = app.Page(app.Resource('https://shop.example/', html, []))
+        checks = {c['id']: c for c in app.analyze_pages([page])}
+        self.assertEqual(checks['payment']['status'], 'unknown')
+        self.assertEqual(checks['returns']['status'], 'unknown')
+
+    def test_payment_label_alone_is_not_policy(self):
+        page = app.Page(app.Resource('https://shop.example/', '<p>Методы оплаты</p>', []))
+        checks = {c['id']: c for c in app.analyze_pages([page])}
+        self.assertEqual(checks['payment']['status'], 'unknown')
+
+    def test_actual_policy_text_is_found(self):
+        page = app.Page(app.Resource('https://shop.example/', '<main><p>Оплата банковской картой при получении.</p><p>Возврат товара в течение 14 дней.</p></main>', []))
+        checks = {c['id']: c for c in app.analyze_pages([page])}
+        self.assertEqual(checks['payment']['status'], 'observed')
+        self.assertEqual(checks['returns']['status'], 'observed')
+
+    def test_contacts_deduplicated_across_pages_but_sources_retained(self):
+        pages = [app.Page(app.Resource('https://shop.example/' + str(i), '<p>+7 800 551-84-74 shop@example.com</p>', [])) for i in range(3)]
+        pages.append(app.Page(app.Resource('https://shop.example/4', '<p>8 (800) 551 84 74</p>', [])))
+        contacts = app.analyze_pages(pages)[0]
+        self.assertEqual(len(contacts['evidence']), 2)
+        self.assertEqual(len(contacts['sources']), 4)
+
     def test_related_links_stay_on_same_host(self):
         page = app.Page(app.Resource('https://shop.example/', '<a href="/contacts">Контакты</a><a href="https://evil.example/return">Возврат</a><a href="javascript:alert(1)">Оплата</a>', []))
         self.assertEqual(app.related_pages(page), ['https://shop.example/contacts'])
@@ -75,6 +100,8 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(report['verdict'], 'insufficient')
         self.assertEqual(report['observed'], 0)
         self.assertEqual(report['pages'], [])
+        self.assertIn('не завершена', report['assessment']['headline'])
+        self.assertIn('Повторите', report['assessment']['recommendation'])
         self.assertTrue(any(c['id'] == 'reputation' and c['status'] == 'not_connected' for c in report['checks']))
 
     def test_instagram_does_not_score_platform_age(self):
@@ -83,6 +110,7 @@ class AnalysisTests(unittest.TestCase):
         fetch.assert_not_called()
         self.assertEqual(report['verdict'], 'insufficient')
         self.assertNotIn('domain', [c['id'] for c in report['checks']])
+        self.assertIn('сайт из описания', report['assessment']['recommendation'])
 
     def test_full_pipeline_preserves_evidence_and_limits_verdict(self):
         def fixture(url, **kwargs):
@@ -99,6 +127,19 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(checks['contacts']['sources'], ['https://shop.example/contacts'])
         self.assertEqual(report['verdict'], 'insufficient')
         self.assertEqual(report['analysis_mode'], 'rules')
+        assessment = report['assessment']
+        self.assertIn('контакты', assessment['explanation'])
+        self.assertIn('С предоплатой', assessment['recommendation'])
+        self.assertIn('registry', [g['check_id'] for g in assessment['gaps']])
+        self.assertNotIn('contacts', [g['check_id'] for g in assessment['gaps']])
+        self.assertIn('contacts', [f['check_id'] for f in assessment['facts']])
+
+    def test_assessment_links_signals_to_their_evidence(self):
+        checks = [app.finding('domain', 'История домена', 'caution', 'Домен младше 180 дней.', ['https://rdap.org/domain/shop.example'])]
+        assessment = app.make_assessment(checks, 1)
+        self.assertEqual(assessment['signals'], [{'check_id': 'domain', 'text': 'Домен младше 180 дней.'}])
+        self.assertNotIn('domain', [g['check_id'] for g in assessment['gaps']])
+        self.assertNotIn('мошенник', assessment['headline'])
 
     def test_young_domain_is_caution_not_fraud(self):
         now = dt.datetime.now(dt.timezone.utc).isoformat()
