@@ -57,6 +57,9 @@
 .score-conclusion p { font-size: 13px; line-height: 1.8; color: var(--muted); margin: 0; }
 .score-card .report-meta { font-size: 10px; color: var(--muted); margin: 18px 0 0; }
 .collection-note { font-size: 12px; line-height: 1.8; color: #79571e; background: #fff7e7; border-radius: 7px; padding: 13px 15px; margin: 16px 0 0; }
+.header-actions { display: flex; gap: 22px; align-items: center; }
+.runtime-status { font-size: 10px; color: var(--green); }
+@media (max-width: 720px) { .header-actions .header-link { display: none; } }
 .quick-reasons { padding: 25px 0 10px; }
 .quick-reasons h3 { font-size: 15px; margin: 0 0 12px; }
 .quick-reasons ul { padding-left: 19px; margin: 0; }

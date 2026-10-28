@@ -106,7 +106,7 @@ class IndependentSourcesTests(unittest.TestCase):
         self.assertEqual(app.score_evidence(checks, 1)['value'], 5)
 
     def test_401_does_not_cancel_domain_archive_or_search(self):
-        with patch('app.fetch', side_effect=app.CheckError('HTTP 401', kind='http', status=401)), \
+        with patch.dict('os.environ', {'STORELENS_BROWSER': '0'}), patch('app.fetch', side_effect=app.CheckError('HTTP 401', kind='http', status=401)), \
              patch('app.domain_check', return_value=app.finding('domain', 'Домен', 'observed', 'Домен зарегистрирован в 2004', ['https://rdap.org/'])), \
              patch('app.archive_check', return_value=app.finding('archive', 'Архив', 'observed', 'Снимок 2015 года', ['https://web.archive.org/'])), \
              patch('app.search_mentions', return_value=app.finding('mentions', 'Упоминания', 'observed', 'Найдена ссылка', ['https://reviews.example/'])), \

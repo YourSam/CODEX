@@ -25,10 +25,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-VERSION = '0.4.0'
+VERSION = '0.5.0'
 MAX_BYTES = 1_500_000
 TIMEOUT = 7
 SLOTS = threading.BoundedSemaphore(3)
+BROWSER_READY = False
 
 
 class CheckError(ValueError):
@@ -160,13 +161,14 @@ def fetch(url: str, *, expected: str = 'html', headers=None, timeout=TIMEOUT) ->
                 current = target
                 continue
             code = exc.code
+            auth_required = code == 401 and bool(exc.headers.get('WWW-Authenticate'))
             exc.close()
             messages = {
                 401: 'HTTP 401: источник отклонил автоматический запрос. Возможны требования сессии или ограничения доступа; точная причина не установлена.',
                 403: 'HTTP 403: доступ к источнику запрещён сайтом или сетевым прокси.',
                 429: 'HTTP 429: источник ограничил частоту запросов. Повторите позже.',
             }
-            raise CheckError(messages.get(code, f'Источник вернул HTTP {code}.') + ' Это не доказывает мошенничество.', kind='http', status=code) from None
+            raise CheckError(messages.get(code, f'Источник вернул HTTP {code}.') + ' Это не доказывает мошенничество.', kind='http_auth' if auth_required else 'http', status=code) from None
         except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
             reason = getattr(exc, 'reason', exc)
             if isinstance(reason, ssl.SSLCertVerificationError):
@@ -392,15 +394,12 @@ def score_evidence(checks: list[dict], page_count: int) -> dict:
                 explanation='Баллы начисляются за найденные сведения по фиксированной шкале. Недоступные и неподключённые проверки не добавляют баллов. История веб-архива и поисковые фрагменты не подтверждают репутацию и не приносят баллов. Проверка организации и репутации пока не реализована, поэтому максимум — 40/100.')
 
 
-def browser_render(resource: Resource) -> Resource:
-    if os.environ.get('STORELENS_BROWSER') != '1':
-        raise CheckError('Браузерная загрузка выключена. Для динамических страниц включите её по инструкции в README.', kind='not_configured')
-    payload = json.dumps({'url': resource.url, 'html': resource.text}, ensure_ascii=False)
+def browser_worker_call(payload: dict) -> dict:
     process = subprocess.Popen([sys.executable, str(ROOT / 'browser_worker.py')], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                start_new_session=os.name == 'posix')
     try:
-        stdout, _ = process.communicate(payload, timeout=25)
+        stdout, _ = process.communicate(json.dumps(payload), timeout=25)
     except subprocess.TimeoutExpired:
         if os.name == 'posix':
             os.killpg(process.pid, signal.SIGKILL)
@@ -411,14 +410,25 @@ def browser_render(resource: Resource) -> Resource:
     try:
         result = json.loads(stdout)
         if not result.get('ok'):
-            raise CheckError(result.get('error', 'Браузерная загрузка не удалась.'), kind='browser')
-        if len(result['html'].encode()) > MAX_BYTES:
-            raise CheckError('Страница после отрисовки превышает лимит размера.')
-        return Resource(resource.url, result['html'], resource.redirects)
+            raise CheckError(result.get('error', 'Браузерная загрузка не удалась.'), kind=result.get('kind', 'browser'), status=result.get('status'))
+        return result
     except CheckError:
         raise
     except (ValueError, KeyError, TypeError):
         raise CheckError('Не удалось запустить браузер. Проверьте установку Playwright и Chromium по README.', kind='browser') from None
+
+
+def browser_render(resource: Resource) -> Resource:
+    if os.environ.get('STORELENS_BROWSER') != '1':
+        raise CheckError('Браузерная загрузка выключена. Запустите bash ./start-mac.command из папки проекта.', kind='not_configured')
+    result = browser_worker_call({'action': 'render', 'url': resource.url})
+    try:
+        html, url = result['html'], normalize_url(result['url'])
+        if not isinstance(html, str) or len(html.encode()) > MAX_BYTES:
+            raise ValueError()
+        return Resource(url, html, resource.redirects)
+    except (ValueError, KeyError, TypeError):
+        raise CheckError('Браузер не вернул корректную страницу.', kind='browser') from None
 
 
 def whois_created(host: str) -> tuple[dt.datetime, str]:
@@ -546,6 +556,24 @@ def domain_check(host: str) -> dict:
         return finding('domain', 'История домена', 'unknown', 'Дата регистрации не получена: RDAP может быть недоступен или не поддерживать доменную зону / поддомен.', [url])
 
 
+def load_initial(url: str, checks: list) -> Resource:
+    try:
+        return fetch(url)
+    except CheckError as initial_error:
+        # Some public sites reject non-browser clients with 401 without an
+        # authentication challenge. Try one fresh anonymous Chromium session.
+        # WWW-Authenticate, 403, CAPTCHA and repeated denials are not bypassed.
+        if initial_error.status != 401 or initial_error.kind != 'http' or os.environ.get('STORELENS_BROWSER') != '1':
+            raise
+        try:
+            resource = browser_render(Resource(url, '', []))
+        except CheckError as browser_error:
+            checks.append(finding('browser', 'Браузерная загрузка', 'unknown', str(browser_error), [url]))
+            raise initial_error
+        checks.append(finding('browser', 'Браузерная загрузка', 'observed', 'Обычный загрузчик получил HTTP 401. Публичная страница получена в новой анонимной сессии Chromium. Авторизация пользователя не использовалась.', [resource.url]))
+        return resource
+
+
 def check_store(value: str) -> dict:
     started = time.monotonic()
     url = normalize_url(value)
@@ -562,16 +590,18 @@ def check_store(value: str) -> dict:
             archive = pool.submit(archive_check, host)
             mentions = pool.submit(search_mentions, host)
             try:
-                resource = fetch(url)
+                resource = load_initial(url, checks)
                 page = Page(resource)
                 challenge = re.search(r'just a moment|verify you are human|checking your browser|captcha|проверка браузера|доступ ограничен', page.text, re.I)
-                if not challenge and len(page.prose) < 200:
+                if not challenge and len(page.prose) < 200 and not any(c['id'] == 'browser' and c['status'] == 'observed' for c in checks):
                     try:
                         rendered = browser_render(resource)
                         candidate = Page(rendered)
                         if len(candidate.prose) <= len(page.prose):
                             raise CheckError('Отрисовка не добавила содержимого магазина. Данные остаются неполными.')
                         page = candidate
+                        resource = rendered
+                        challenge = re.search(r'just a moment|verify you are human|checking your browser|captcha|проверка браузера|доступ ограничен', page.text, re.I)
                         checks.append(finding('browser', 'Динамическая страница', 'observed', 'Получен текст после выполнения JavaScript в изолированном браузере. Это не подтверждает добросовестность продавца.', [resource.url]))
                     except CheckError as exc:
                         checks.append(finding('browser', 'Динамическая страница', 'unknown' if os.environ.get('STORELENS_BROWSER') == '1' else 'not_connected', str(exc), [resource.url]))
@@ -619,6 +649,7 @@ def check_store(value: str) -> dict:
                 verdict='caution' if caution else 'insufficient',
                 headline=assessment['headline'], summary=assessment['explanation'], assessment=assessment,
                 score=score_evidence(checks, len(pages)), version=VERSION, collection=collection,
+                runtime={'browser_enabled': os.environ.get('STORELENS_BROWSER') == '1', 'browser_ready': BROWSER_READY},
                 checks=checks, observed=observed, caution=caution,
                 pages=[{'url': p.url, 'title': p.title[:160]} for p in pages],
                 next_steps=['Сверьте ИНН, название и платёжные реквизиты с официальным реестром.', 'Поищите независимые отзывы по домену, телефону и реквизитам.', 'Предпочитайте оплату с защитой покупателя; избегайте переводов незнакомому физлицу.'],
@@ -649,7 +680,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         if path == '/api/health':
-            return self.json(200, {'status': 'ok', 'version': VERSION, 'analysis_mode': 'rules'})
+            return self.json(200, {'status': 'ok', 'version': VERSION, 'analysis_mode': 'rules', 'browser_enabled': os.environ.get('STORELENS_BROWSER') == '1', 'browser_ready': BROWSER_READY})
         files = {'/': ('index.html', 'text/html'), '/style.css': ('style.css', 'text/css'), '/app.js': ('app.js', 'text/javascript')}
         if path not in files:
             return self.json(404, {'error': 'Страница не найдена.'})
@@ -696,14 +727,25 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
+    global BROWSER_READY
     parser = argparse.ArgumentParser(description='StoreLens — проверка магазина')
     parser.add_argument('--version', action='version', version='StoreLens ' + VERSION)
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--browser', action='store_true', help='Включить установленный браузерный модуль для динамических страниц')
+    parser.add_argument('--check-browser', action='store_true', help='Проверить реальный запуск Chromium и завершить работу')
     args = parser.parse_args()
     if args.browser:
         os.environ['STORELENS_BROWSER'] = '1'
+    if args.check_browser or os.environ.get('STORELENS_BROWSER') == '1':
+        try:
+            browser_worker_call({'action': 'probe'})
+        except CheckError as exc:
+            parser.error(str(exc))
+        BROWSER_READY = True
+        print('Chromium проверен: браузер действительно запускается.', flush=True)
+        if args.check_browser:
+            return
     server = Server((args.host, args.port), Handler)
     print(f'StoreLens {VERSION}: http://{args.host}:{args.port} (Ctrl+C для остановки)', flush=True)
     print(f'Папка проекта: {ROOT.resolve()}', flush=True)

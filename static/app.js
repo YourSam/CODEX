@@ -25,7 +25,7 @@ function sourceLink(url, label) {
 
 function render(data) {
   $('report-domain').textContent = data.host;
-  if (data.version !== '0.4.0') throw new Error('Запущена старая версия сервера. Остановите её и запустите приложение из новой папки проекта.');
+  if (data.version !== '0.5.0') throw new Error('Запущена старая версия сервера. Остановите её и запустите приложение из новой папки проекта.');
   $('report-verdict').textContent = data.headline;
   $('report-summary').textContent = data.summary;
   const assessment = data.assessment;
@@ -166,3 +166,10 @@ window.addEventListener('beforeprint', () => {
   $('report-details').open = true;
 });
 window.addEventListener('afterprint', () => { $('report-details').open = detailsWereOpen; });
+
+fetch('/api/health').then(response => {
+  if (!response.ok) throw new Error();
+  return response.json();
+}).then(health => {
+  $('runtime-status').textContent = health.browser_ready ? 'Chromium проверен' : health.browser_enabled ? 'Chromium не проверен' : 'HTML-режим';
+}).catch(() => { $('runtime-status').textContent = 'Нет связи с сервером'; });
