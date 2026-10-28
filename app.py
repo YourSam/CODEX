@@ -7,9 +7,13 @@ import datetime as dt
 import http.client
 import ipaddress
 import json
+import os
 import re
+import signal
 import socket
 import ssl
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -21,14 +25,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-VERSION = '0.3.0'
+VERSION = '0.4.0'
 MAX_BYTES = 1_500_000
 TIMEOUT = 7
 SLOTS = threading.BoundedSemaphore(3)
 
 
 class CheckError(ValueError):
-    pass
+    def __init__(self, message, *, kind='unavailable', status=None):
+        super().__init__(message)
+        self.kind = kind
+        self.status = status
 
 
 def normalize_url(value: str) -> str:
@@ -67,7 +74,7 @@ def public_addresses(host: str, port: int) -> list[str]:
     try:
         addresses = list(dict.fromkeys(row[4][0] for row in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)))
     except OSError:
-        raise CheckError('Не удалось получить DNS-адрес сайта.') from None
+        raise CheckError('Не удалось получить DNS-адрес сайта.', kind='dns') from None
     if not addresses or any(not ipaddress.ip_address(a).is_global for a in addresses):
         raise CheckError('Доступ к внутренним и служебным адресам запрещён.')
     return addresses
@@ -110,9 +117,11 @@ class Resource:
     url: str
     text: str
     redirects: list[str]
+    mime: str = 'text/html'
+    body: bytes | None = None
 
 
-def fetch(url: str, *, expected: str = 'html') -> Resource:
+def fetch(url: str, *, expected: str = 'html', headers=None, timeout=TIMEOUT) -> Resource:
     """Validate each redirect. Direct connections pin the validated public IP.
 
     With an inherited proxy, urllib delegates transport/DNS to that trusted proxy;
@@ -131,14 +140,18 @@ def fetch(url: str, *, expected: str = 'html') -> Resource:
             handlers += [SafeHTTPHandler(), SafeHTTPSHandler()]
         opener = urllib.request.build_opener(*handlers)
         request = urllib.request.Request(current, headers={
-            'User-Agent': 'StoreLensPrototype/0.1 (website risk research)',
-            'Accept': 'application/json' if expected == 'json' else 'text/html,application/xhtml+xml',
+            'User-Agent': 'StoreLens/' + VERSION + ' (website risk research)',
+            'Accept': 'application/json' if expected == 'json' else '*/*' if expected == 'any' else 'text/html,application/xhtml+xml',
             'Accept-Encoding': 'identity',
+            **(headers or {}),
         })
         try:
-            response = opener.open(request, timeout=TIMEOUT)
+            response = opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
             if exc.code in (301, 302, 303, 307, 308) and exc.headers.get('Location'):
+                if headers:
+                    exc.close()
+                    raise CheckError('API перенаправил запрос. Переход с ключом доступа запрещён.', kind='api_redirect')
                 target = normalize_url(urllib.parse.urljoin(current, exc.headers['Location']))
                 exc.close()
                 if p.scheme == 'https' and target.startswith('http:'):
@@ -148,16 +161,29 @@ def fetch(url: str, *, expected: str = 'html') -> Resource:
                 continue
             code = exc.code
             exc.close()
-            raise CheckError(f'Источник вернул HTTP {code}. Это не доказывает мошенничество.') from None
-        except (OSError, urllib.error.URLError, http.client.HTTPException):
-            raise CheckError('Источник недоступен: соединение, TLS или сетевые ограничения. Это не доказывает мошенничество.') from None
+            messages = {
+                401: 'HTTP 401: источник отклонил автоматический запрос. Возможны требования сессии или ограничения доступа; точная причина не установлена.',
+                403: 'HTTP 403: доступ к источнику запрещён сайтом или сетевым прокси.',
+                429: 'HTTP 429: источник ограничил частоту запросов. Повторите позже.',
+            }
+            raise CheckError(messages.get(code, f'Источник вернул HTTP {code}.') + ' Это не доказывает мошенничество.', kind='http', status=code) from None
+        except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+            reason = getattr(exc, 'reason', exc)
+            if isinstance(reason, ssl.SSLCertVerificationError):
+                raise CheckError('Не удалось проверить TLS-сертификат. На macOS выполните Install Certificates.command из папки Python. Проверка сертификатов остаётся включённой.', kind='tls') from None
+            if isinstance(reason, (socket.timeout, TimeoutError)):
+                raise CheckError('Источник не ответил за отведённое время.', kind='timeout') from None
+            raise CheckError('Источник недоступен: соединение или сетевые ограничения. Это не доказывает мошенничество.', kind='network') from None
         with response:
             mime = response.headers.get_content_type()
             if expected == 'html' and mime not in ('text/html', 'application/xhtml+xml'):
                 raise CheckError('По ссылке не HTML-страница магазина.')
             if expected == 'json' and not (mime.endswith('/json') or mime.endswith('+json')):
                 raise CheckError('Источник не вернул ожидаемые данные JSON.')
-            data = response.read(MAX_BYTES + 1)
+            try:
+                data = response.read(MAX_BYTES + 1)
+            except (OSError, http.client.HTTPException):
+                raise CheckError('Передача данных от источника прервана.', kind='network') from None
             if len(data) > MAX_BYTES:
                 raise CheckError('Ответ превышает лимит размера; источник не обработан.')
             charset = response.headers.get_content_charset() or 'utf-8'
@@ -165,7 +191,7 @@ def fetch(url: str, *, expected: str = 'html') -> Resource:
                 text = data.decode(charset, errors='replace')
             except LookupError:
                 text = data.decode('utf-8', errors='replace')
-            return Resource(current, text, redirects)
+            return Resource(current, text, redirects, mime, data)
     raise CheckError('Слишком много перенаправлений; проверка источника остановлена.')
 
 
@@ -281,6 +307,8 @@ def make_assessment(checks: list[dict], page_count: int) -> dict:
         'returns': 'Найден текст о возврате. Выполнение этих условий не проверено.',
         'payment': 'Найден текст о способах или порядке оплаты.',
         'domain': 'Получена дата регистрации домена. Это не подтверждает историю продавца.',
+        'archive': 'Найдена историческая запись главной страницы в веб-архиве.',
+        'mentions': 'Найдены внешние ссылки. Поисковые фрагменты ещё не проверены на достоверность.',
     }
     for key, check in by_id.items():
         if check['status'] == 'caution':
@@ -295,20 +323,24 @@ def make_assessment(checks: list[dict], page_count: int) -> dict:
         'domain': 'Не удалось установить дату регистрации домена.',
         'content': 'Содержимое магазина может быть неполным из-за защиты или динамической загрузки.',
         'registry': 'Организация и её связь с магазином не проверены: реестр не подключён.',
-        'reputation': 'Независимые отзывы и жалобы не проверены: поиск не подключён.',
+        'reputation': 'Достоверность отзывов и их принадлежность продавцу ещё не подтверждены.',
         'threats': 'Проверка по базам известных угроз не выполнена: источник не подключён.',
     }
     for key, text in missing.items():
         if key in by_id and by_id[key]['status'] in ('unknown', 'not_connected'):
             gaps.append({'check_id': key, 'text': text})
+    for key in ('mentions', 'archive', 'browser'):
+        if key in by_id and by_id[key]['status'] in ('unknown', 'not_connected'):
+            gaps.append({'check_id': key, 'text': by_id[key]['summary']})
     if 'instagram' in by_id:
         recommendation = 'Для проверки продавца вставьте сайт из описания профиля.'
         explanation = 'Instagram-профиль не проанализирован: доступ к платформе пока не подключён. Сделать вывод о продавце по этой ссылке нельзя.'
         headline = 'Этот профиль пока не удалось проверить'
     elif not page_count:
-        recommendation = 'Повторите проверку позже. Для решения об оплате этот отчёт не подходит.'
-        explanation = 'Содержимое магазина получить не удалось. Даже если сведения о домене доступны, они не позволяют оценить выполнение заказов.'
-        headline = 'Проверка магазина не завершена'
+        recommendation = 'Ознакомьтесь с доступными внешними источниками. Надёжность продавца перед предоплатой пока не подтверждена.' if facts else 'Повторите проверку позже. Для решения об оплате этот отчёт не подходит.'
+        failure = by_id.get('connection', {}).get('summary', 'Содержимое магазина получить не удалось.')
+        explanation = failure + (' Внешние сведения получены независимо от загрузки магазина; они перечислены ниже.' if facts else ' Независимых сведений, достаточных для оценки продавца, пока нет.')
+        headline = 'Сайт недоступен — получен частичный отчёт' if facts else 'Проверка магазина не завершена'
         gaps.insert(0, {'check_id': 'connection', 'text': 'Страницы магазина не получены. Причина указана в проверке загрузки.'})
     else:
         recommendation = 'С предоплатой стоит подождать: сначала подтвердите продавца и способ защиты платежа.'
@@ -319,7 +351,7 @@ def make_assessment(checks: list[dict], page_count: int) -> dict:
         explanation += 'Есть отдельные поводы для осторожности — они перечислены ниже.' if signals else 'Этих данных недостаточно, чтобы рекомендовать предоплату или обвинять магазин в мошенничестве.'
     return dict(headline=headline, explanation=explanation, recommendation=recommendation,
                 facts=facts, gaps=gaps, signals=signals,
-                coverage='Ограниченная проверка — внешняя репутация, организация и базы угроз не проверены.')
+                coverage='Проверка ограничена доступными источниками. Поисковые ссылки и история домена не подтверждают выполнение заказов.')
 
 
 def score_evidence(checks: list[dict], page_count: int) -> dict:
@@ -354,14 +386,136 @@ def score_evidence(checks: list[dict], page_count: int) -> dict:
     value = sum(row['points'] for row in breakdown) if available else None
     obtained = sum(by_id.get(key, {}).get('status') in ('observed', 'caution') for key, _, _ in factors if key not in ('registry', 'reputation', 'threats'))
     return dict(value=value, maximum=100, grade='Мало подтверждений' if available else 'Оценка недоступна',
-                description='Предварительный индекс подтверждений, не вероятность безопасности. Низкий балл может означать нехватку данных, а не мошенничество.',
+                description='Предварительный индекс подтверждений, не вероятность безопасности. Низкий балл может означать нехватку данных, а не мошенничество.' if available else 'Недостаточно сведений о продавце для числовой оценки. Доступные результаты и причины ограничений показаны ниже.',
                 coverage=f'Получены сведения по {obtained} из {len(factors)} направлений.',
                 breakdown=breakdown, methodology_version='evidence-0.1',
-                explanation='Баллы начисляются за найденные сведения по фиксированной шкале. Недоступные и неподключённые проверки не добавляют баллов. Внешние источники пока не подключены, поэтому максимум текущей версии — 40/100.')
+                explanation='Баллы начисляются за найденные сведения по фиксированной шкале. Недоступные и неподключённые проверки не добавляют баллов. История веб-архива и поисковые фрагменты не подтверждают репутацию и не приносят баллов. Проверка организации и репутации пока не реализована, поэтому максимум — 40/100.')
+
+
+def browser_render(resource: Resource) -> Resource:
+    if os.environ.get('STORELENS_BROWSER') != '1':
+        raise CheckError('Браузерная загрузка выключена. Для динамических страниц включите её по инструкции в README.', kind='not_configured')
+    payload = json.dumps({'url': resource.url, 'html': resource.text}, ensure_ascii=False)
+    process = subprocess.Popen([sys.executable, str(ROOT / 'browser_worker.py')], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                               start_new_session=os.name == 'posix')
+    try:
+        stdout, _ = process.communicate(payload, timeout=25)
+    except subprocess.TimeoutExpired:
+        if os.name == 'posix':
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+        process.communicate()
+        raise CheckError('Браузерная загрузка превысила 25 секунд и остановлена.', kind='timeout') from None
+    try:
+        result = json.loads(stdout)
+        if not result.get('ok'):
+            raise CheckError(result.get('error', 'Браузерная загрузка не удалась.'), kind='browser')
+        if len(result['html'].encode()) > MAX_BYTES:
+            raise CheckError('Страница после отрисовки превышает лимит размера.')
+        return Resource(resource.url, result['html'], resource.redirects)
+    except CheckError:
+        raise
+    except (ValueError, KeyError, TypeError):
+        raise CheckError('Не удалось запустить браузер. Проверьте установку Playwright и Chromium по README.', kind='browser') from None
+
+
+def whois_created(host: str) -> tuple[dt.datetime, str]:
+    """Fixed authoritative WHOIS server; no referrals or user-chosen TCP targets."""
+    host = urllib.parse.urlsplit(normalize_url(host)).hostname.removeprefix('www.')
+    if host.count('.') != 1 or not host.endswith(('.ru', '.xn--p1ai')):
+        raise CheckError('WHOIS-резерв поддерживает только домены второго уровня .ru и .рф.')
+    # A managed HTTP proxy is not a grant for direct TCP. Never bypass it.
+    if any(urllib.request.getproxies().get(key) for key in ('http', 'https', 'all')):
+        raise CheckError('Резервный WHOIS требует TCP 43 и не используется при настроенном HTTP-прокси.')
+    addresses = public_addresses('whois.tcinet.ru', 43)
+    deadline = time.monotonic() + TIMEOUT
+    chunks, size = [], 0
+    try:
+        with socket.create_connection((addresses[0], 43), timeout=TIMEOUT) as connection:
+            connection.sendall((host + '\r\n').encode('ascii'))
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CheckError('Истекло время ожидания WHOIS.')
+                connection.settimeout(remaining)
+                chunk = connection.recv(min(4096, 32769 - size))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > 32768:
+                    raise CheckError('WHOIS вернул слишком большой ответ.')
+    except OSError:
+        raise CheckError('WHOIS-сервер недоступен по TCP 43.') from None
+    text = b''.join(chunks).decode('utf-8', errors='replace')
+    registered = re.search(r'^domain:\s*(\S+)', text, re.M | re.I)
+    match = re.search(r'^created:\s*(\S+)', text, re.M | re.I)
+    if not registered or registered[1].lower() != host or not match:
+        raise CheckError('WHOIS не вернул дату для запрошенного домена.')
+    return dt.datetime.fromisoformat(match[1].replace('Z', '+00:00')), host
+
+
+def archive_check(host: str) -> dict:
+    domain = host.removeprefix('www.')
+    query = urllib.parse.urlencode({'url': domain + '/', 'matchType': 'exact', 'output': 'json',
+                                   'filter': 'statuscode:200', 'fl': 'timestamp,original', 'limit': 1})
+    url = 'https://web.archive.org/cdx/search/cdx?' + query
+    try:
+        data = json.loads(fetch(url, expected='json').text)
+        if not isinstance(data, list) or len(data) < 2:
+            return finding('archive', 'История в веб-архиве', 'unknown', 'Архив не вернул сохранённую главную страницу для этого имени. Это не доказывает, что сайт новый.', [url])
+        if data[0] != ['timestamp', 'original']:
+            raise CheckError('Неизвестный формат ответа веб-архива.')
+        timestamp, original = data[1]
+        original = normalize_url(original)
+        if urllib.parse.urlsplit(original).hostname.removeprefix('www.') != domain:
+            raise CheckError('Архив вернул запись для другого домена.')
+        date = dt.datetime.strptime(timestamp, '%Y%m%d%H%M%S').replace(tzinfo=dt.timezone.utc)
+        if date > dt.datetime.now(dt.timezone.utc):
+            raise CheckError('Некорректная дата архива.')
+        return finding('archive', 'История в веб-архиве', 'observed', f'Найдена сохранённая главная страница от {date:%d.%m.%Y}. Это история адреса, а не подтверждение нынешнего владельца или выполнения заказов.',
+                       [url, 'https://web.archive.org/web/' + timestamp + '/' + original])
+    except (CheckError, ValueError, TypeError, IndexError, AttributeError) as exc:
+        reason = str(exc) if isinstance(exc, CheckError) else 'Источник вернул неподдерживаемый формат данных.'
+        return finding('archive', 'История в веб-архиве', 'unknown', 'Данные веб-архива не получены. ' + reason, [url])
+
+
+def search_mentions(host: str) -> dict:
+    key = os.environ.get('STORELENS_SEARCH_KEY', '').strip()
+    if not key:
+        return finding('mentions', 'Внешние упоминания', 'not_connected', 'Внешний поиск пока не подключён. Автоматический поиск упоминаний недоступен в этой конфигурации.')
+    domain = host.removeprefix('www.')
+    query = urllib.parse.urlencode({'q': '"' + domain + '" отзывы complaints reviews', 'count': 8})
+    api = 'https://api.search.brave.com/res/v1/web/search?' + query
+    try:
+        data = json.loads(fetch(api, expected='json', headers={'X-Subscription-Token': key}).text)
+        results, seen = [], set()
+        for row in data.get('web', {}).get('results', []):
+            try:
+                url = normalize_url(row.get('url', ''))
+                target = urllib.parse.urlsplit(url).hostname
+                if target == domain or target.endswith('.' + domain) or url in seen:
+                    continue
+                seen.add(url)
+                title = str(row.get('title') or target)[:200]
+                snippet = re.sub('<[^>]+>', '', str(row.get('description', '')))[:500]
+                results.append((url, title + (': ' + snippet if snippet else '')))
+            except CheckError:
+                continue
+        if not results:
+            return finding('mentions', 'Внешние упоминания', 'unknown', 'Поиск выполнен, внешние ссылки не найдены в ответе провайдера. Это не означает отсутствия жалоб или безопасности магазина.')
+        return finding('mentions', 'Внешние упоминания', 'observed', 'Найдены внешние ссылки по запросу о домене. Это поисковые фрагменты: содержание страниц и принадлежность отзывов этому продавцу ещё не подтверждены. Баллы доверия за них не начисляются.', [r[0] for r in results], [r[1] for r in results])
+    except (CheckError, ValueError, TypeError, AttributeError) as exc:
+        reason = str(exc) if isinstance(exc, CheckError) else 'Некорректный ответ API.'
+        return finding('mentions', 'Внешние упоминания', 'unknown', 'Поиск не завершён. ' + reason)
 
 
 def domain_check(host: str) -> dict:
     url = 'https://rdap.org/domain/' + host.removeprefix('www.')
+    failures = []
+    source, evidence = url, []
     try:
         resource = fetch(url, expected='json')
         data = json.loads(resource.text)
@@ -369,13 +523,25 @@ def domain_check(host: str) -> dict:
         if not dates:
             raise CheckError('RDAP не предоставил дату регистрации этого имени.')
         date = dt.datetime.fromisoformat(dates[0].replace('Z', '+00:00'))
+        source = resource.url
+    except (CheckError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        failures.append('RDAP: ' + (str(exc) if isinstance(exc, CheckError) else 'дата регистрации отсутствует или имеет неподдерживаемый формат.'))
+        try:
+            date, domain = whois_created(host)
+            zone = 'ru' if domain.endswith('.ru') else 'xn--p1ai'
+            source = 'https://www.iana.org/domains/root/db/' + zone + '.html'
+            evidence = ['Источник: WHOIS whois.tcinet.ru; запрошенный домен: ' + domain + '; created: ' + date.isoformat()]
+        except (CheckError, ValueError) as exc:
+            failures.append(str(exc))
+            return finding('domain', 'История домена', 'unknown', ' '.join(failures), [url])
+    try:
         if date.tzinfo is None:
             date = date.replace(tzinfo=dt.timezone.utc)
         age = (dt.datetime.now(dt.timezone.utc) - date).days
         if age < 0:
             raise CheckError('Источник вернул некорректную дату регистрации.')
         young = age < 180
-        return finding('domain', 'История домена', 'caution' if young else 'observed', f'Дата регистрации: {date:%d.%m.%Y}. Возраст: {age} дней. ' + ('Домен младше 180 дней; это повод проверить продавца внимательнее, а не доказательство мошенничества.' if young else 'Возраст домена не подтверждает добросовестность текущего продавца.'), [resource.url])
+        return finding('domain', 'История домена', 'caution' if young else 'observed', f'Дата регистрации: {date:%d.%m.%Y}. Возраст: {age} дней. ' + ('Домен младше 180 дней; это повод проверить продавца внимательнее, а не доказательство мошенничества.' if young else 'Возраст домена не подтверждает добросовестность текущего продавца.'), [source], evidence)
     except (CheckError, ValueError, TypeError, KeyError, AttributeError):
         return finding('domain', 'История домена', 'unknown', 'Дата регистрации не получена: RDAP может быть недоступен или не поддерживать доменную зону / поддомен.', [url])
 
@@ -391,11 +557,24 @@ def check_store(value: str) -> dict:
     if social:
         checks.append(finding('instagram', 'Instagram-профиль', 'unknown', 'Автоматический доступ к Instagram пока не подключён. Возраст instagram.com и его HTTPS не оценивают продавца. Вставьте сайт магазина из описания профиля.'))
     else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             domain = pool.submit(domain_check, host)
+            archive = pool.submit(archive_check, host)
+            mentions = pool.submit(search_mentions, host)
             try:
                 resource = fetch(url)
                 page = Page(resource)
+                challenge = re.search(r'just a moment|verify you are human|checking your browser|captcha|проверка браузера|доступ ограничен', page.text, re.I)
+                if not challenge and len(page.prose) < 200:
+                    try:
+                        rendered = browser_render(resource)
+                        candidate = Page(rendered)
+                        if len(candidate.prose) <= len(page.prose):
+                            raise CheckError('Отрисовка не добавила содержимого магазина. Данные остаются неполными.')
+                        page = candidate
+                        checks.append(finding('browser', 'Динамическая страница', 'observed', 'Получен текст после выполнения JavaScript в изолированном браузере. Это не подтверждает добросовестность продавца.', [resource.url]))
+                    except CheckError as exc:
+                        checks.append(finding('browser', 'Динамическая страница', 'unknown' if os.environ.get('STORELENS_BROWSER') == '1' else 'not_connected', str(exc), [resource.url]))
                 pages.append(page)
                 title = page.title.strip()[:160] or host
                 checks.append(finding('connection', 'Загрузка и соединение', 'observed' if resource.url.startswith('https:') else 'caution', 'Страница загружена по HTTPS с проверкой сертификата. Это защищает соединение, но не подтверждает честность продавца.' if resource.url.startswith('https:') else 'Страница загружена по HTTP без шифрования.', [resource.url]))
@@ -414,28 +593,36 @@ def check_store(value: str) -> dict:
                             pages.append(Page(extra))
                         except CheckError as exc:
                             checks.append(finding('page-' + str(len(checks)), 'Дополнительная страница', 'unknown', str(exc), [link]))
-                if len(page.text) < 200 or re.search(r'just a moment|verify you are human|checking your browser|captcha|проверка браузера', page.text, re.I):
+                if len(page.prose) < 200 or challenge:
                     checks.append(finding('content', 'Доступность содержимого', 'unknown', 'Страница содержит мало текста или защиту от ботов. Сведения о магазине могут быть неполными.', [page.url]))
-                checks.extend(analyze_pages(pages))
+                if not challenge:
+                    checks.extend(analyze_pages(pages))
             except CheckError as exc:
-                checks.append(finding('connection', 'Загрузка сайта', 'unknown', str(exc), [url]))
-            checks.append(domain.result())
+                failed = finding('connection', 'Загрузка сайта', 'unknown', str(exc), [url])
+                failed.update(error_kind=exc.kind, http_status=exc.status)
+                checks.append(failed)
+            checks.extend([domain.result(), archive.result(), mentions.result()])
     checks.extend([
         finding('threats', 'Базы фишинга и вредоносных сайтов', 'not_connected', 'Источник угроз пока не подключён. Проверка по базам не выполнялась.'),
-        finding('reputation', 'Независимая репутация', 'not_connected', 'Поисковый API пока не подключён. Внешние отзывы и жалобы не проверены.'),
+        finding('reputation', 'Подтверждение репутации', 'not_connected', 'Проверка содержания отзывов и их принадлежности продавцу пока не реализована. Найденные поисковые ссылки показаны отдельно, если поиск настроен.'),
         finding('registry', 'Подтверждение организации', 'not_connected', 'Реестр компаний пока не подключён. Реквизиты на сайте не подтверждают личность владельца.'),
     ])
     caution = sum(c['status'] == 'caution' for c in checks)
     observed = sum(c['status'] == 'observed' for c in checks)
     assessment = make_assessment(checks, len(pages))
+    connection = next((c for c in checks if c['id'] == 'connection'), {})
+    collection = dict(site_loaded=bool(pages), http_status=connection.get('http_status'),
+                      error_kind=connection.get('error_kind'),
+                      message=connection.get('summary', '') if connection.get('status') == 'unknown' else '',
+                      external_results=sum(c['status'] in ('observed', 'caution') for c in checks if c['id'] in ('domain', 'archive', 'mentions')))
     return dict(url=url, host=host, title=title, checked_at=dt.datetime.now(dt.timezone.utc).isoformat(), duration_seconds=round(time.monotonic() - started, 1),
                 verdict='caution' if caution else 'insufficient',
                 headline=assessment['headline'], summary=assessment['explanation'], assessment=assessment,
-                score=score_evidence(checks, len(pages)), version=VERSION,
+                score=score_evidence(checks, len(pages)), version=VERSION, collection=collection,
                 checks=checks, observed=observed, caution=caution,
                 pages=[{'url': p.url, 'title': p.title[:160]} for p in pages],
                 next_steps=['Сверьте ИНН, название и платёжные реквизиты с официальным реестром.', 'Поищите независимые отзывы по домену, телефону и реквизитам.', 'Предпочитайте оплату с защитой покупателя; избегайте переводов незнакомому физлицу.'],
-                analysis_mode='rules', limitations='Прототип: проверка доступных страниц и RDAP. ИИ, поиск отзывов и базы угроз не подключены. Отсутствие находок не означает безопасность.')
+                analysis_mode='rules', limitations='Прототип: страницы магазина, RDAP / резервный WHOIS, метаданные веб-архива; поиск внешних ссылок при настроенном API. Браузерная отрисовка — опция для доступных динамических страниц. ИИ, подтверждение репутации и базы угроз не подключены. Отсутствие находок не означает безопасность.')
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -513,7 +700,10 @@ def main():
     parser.add_argument('--version', action='version', version='StoreLens ' + VERSION)
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8000)
+    parser.add_argument('--browser', action='store_true', help='Включить установленный браузерный модуль для динамических страниц')
     args = parser.parse_args()
+    if args.browser:
+        os.environ['STORELENS_BROWSER'] = '1'
     server = Server((args.host, args.port), Handler)
     print(f'StoreLens {VERSION}: http://{args.host}:{args.port} (Ctrl+C для остановки)', flush=True)
     print(f'Папка проекта: {ROOT.resolve()}', flush=True)

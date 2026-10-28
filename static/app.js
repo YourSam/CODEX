@@ -25,11 +25,14 @@ function sourceLink(url, label) {
 
 function render(data) {
   $('report-domain').textContent = data.host;
-  if (data.version !== '0.3.0') throw new Error('Запущена старая версия сервера. Остановите её и запустите приложение из новой папки проекта.');
+  if (data.version !== '0.4.0') throw new Error('Запущена старая версия сервера. Остановите её и запустите приложение из новой папки проекта.');
   $('report-verdict').textContent = data.headline;
   $('report-summary').textContent = data.summary;
   const assessment = data.assessment;
   const score = data.score;
+  const collection = data.collection;
+  $('collection-note').hidden = !collection.message;
+  $('collection-note').textContent = collection.message ? `${collection.message} Независимых результатов получено: ${collection.external_results}. Подробности — в источниках ниже.` : '';
   $('score-value').textContent = score.value === null ? '—' : score.value;
   $('score-grade').textContent = score.grade;
   $('score-coverage').textContent = score.coverage;
@@ -47,7 +50,7 @@ function render(data) {
     row.append(link);
     return row;
   }));
-  const reasons = [...assessment.signals.slice(0, 1), ...assessment.facts.filter(f => f.check_id !== 'connection').slice(0, 1), ...assessment.gaps.filter(g => ['registry', 'reputation'].includes(g.check_id)).slice(0, 2)].slice(0, 3);
+  const reasons = [...assessment.signals.slice(0, 1), ...assessment.facts.filter(f => f.check_id !== 'connection').slice(0, 2), ...assessment.gaps.filter(g => ['registry', 'reputation'].includes(g.check_id)).slice(0, 2)].slice(0, 3);
   $('score-reasons').replaceChildren(...reasons.map(item => {
     const row = element('li');
     const link = element('a', '', item.text);
